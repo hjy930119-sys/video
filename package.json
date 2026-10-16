@@ -1,6 +1,6 @@
 {
   "name": "frame-studio",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Local video editor with Korean captions and image overlays",
   "main": "main.cjs",
   "author": "Frame Studio",
@@ -36,7 +36,8 @@
       "!ui/fixture.*",
       "!node_modules/ffmpeg-static/ffmpeg",
       "!node_modules/ffmpeg-static/ffmpeg.LICENSE",
-      "!node_modules/ffmpeg-static/ffmpeg.README"
+      "!node_modules/ffmpeg-static/ffmpeg.README",
+      "media.cjs"
     ],
     "win": {
       "target": [
