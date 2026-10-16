@@ -1,6 +1,6 @@
 {
   "name": "frame-studio",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local video editor with Korean captions and image overlays",
   "main": "main.cjs",
   "author": "Frame Studio",
@@ -8,7 +8,7 @@
   "scripts": {
     "start": "electron .",
     "test": "node --test test/*.test.cjs",
-    "dist:win": "electron-builder --win portable --x64"
+    "dist:win": "electron-builder --win --x64"
   },
   "dependencies": {
     "ffmpeg-static": "5.3.0"
@@ -39,12 +39,27 @@
       "!node_modules/ffmpeg-static/ffmpeg.README"
     ],
     "win": {
-      "target": "portable",
-      "artifactName": "Frame-Studio-${version}-Windows.exe",
+      "target": [
+        "nsis",
+        "portable"
+      ],
       "signAndEditExecutable": false
     },
     "directories": {
       "output": "dist"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Frame Studio",
+      "artifactName": "Frame-Studio-${version}-Setup.exe",
+      "runAfterFinish": false
+    },
+    "portable": {
+      "artifactName": "Frame-Studio-${version}-Portable.exe"
     }
   }
 }

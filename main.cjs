@@ -1,42 +1,54 @@
-const {app,BrowserWindow,ipcMain,dialog,protocol,net}=require('electron');
-const {spawn}=require('node:child_process');const fs=require('node:fs/promises');const path=require('node:path');const os=require('node:os');const {pathToFileURL}=require('node:url');const {plan,validate}=require('./engine.cjs');
+const {app,BrowserWindow,ipcMain,dialog,protocol,net,shell}=require('electron');
+const {spawn}=require('node:child_process'),fs=require('node:fs/promises'),path=require('node:path'),os=require('node:os'),crypto=require('node:crypto');
+const {pathToFileURL}=require('node:url'),E=require('./engine.cjs');
 const ffmpeg=process.env.FRAME_FFMPEG||require('ffmpeg-static').replace('app.asar','app.asar.unpacked');
-let win,job;const allowed=new Set();
-protocol.registerSchemesAsPrivileged([{scheme:'media',privileges:{standard:true,secure:true,supportFetchAPI:true,stream:true,bypassCSP:false}}]);
+let win,job;const allowed=new Set();let fontsCache;
+protocol.registerSchemesAsPrivileged([{scheme:'media',privileges:{standard:true,secure:true,supportFetchAPI:true,stream:true,corsEnabled:true}}]);
 const mediaUrl=p=>'media://local/'+encodeURIComponent(p);
-async function grant(p){await fs.access(p);allowed.add(path.resolve(p));return mediaUrl(p);}
-function run(args){return new Promise((resolve,reject)=>{const c=spawn(ffmpeg,args,{windowsHide:true});let stderr='';c.stderr.on('data',d=>stderr+=d);c.on('error',reject);c.on('close',code=>resolve({code,stderr}));});}
-async function probe(p){const r=await run(['-hide_banner','-i',p]);const d=r.stderr.match(/Duration: (\d+):(\d+):(\d+(?:\.\d+)?)/);if(!d)throw Error('미디어 길이를 읽을 수 없습니다. MP4(H.264), MP3 또는 WAV 파일을 사용하세요.');return {duration:+d[1]*3600 + +d[2]*60 + +d[3],hasAudio:/Stream.*Audio:/.test(r.stderr)};}
-async function hydrate(p){validate(p);const paths=[p.video.path,...p.layers.filter(l=>l.type==='image').map(l=>l.path),...(p.music?[p.music.path]:[])];for(const f of paths)await grant(f);p.video.url=mediaUrl(p.video.path);for(const l of p.layers)if(l.type==='image')l.url=mediaUrl(l.path);if(p.music)p.music.url=mediaUrl(p.music.path);return p;}
+const types={video:['mp4','mov','m4v','webm','mkv','avi'],image:['png','jpg','jpeg','webp','bmp'],music:['mp3','wav','m4a','ogg','flac','aac']};
+async function grant(p){if(!(await fs.stat(p)).isFile())throw Error('파일을 선택하세요.');allowed.add(path.resolve(p));return mediaUrl(p);}
+function run(exe,args){return new Promise((resolve,reject)=>{const c=spawn(exe,args,{windowsHide:true});let stderr='',stdout='';c.stderr.on('data',d=>stderr=(stderr+d).slice(-100000));c.stdout.on('data',d=>stdout=(stdout+d).slice(-1000000));c.on('error',reject);c.on('close',code=>resolve({code,stderr,stdout}));});}
+async function probe(p){const r=await run(ffmpeg,['-hide_banner','-i',p]);const d=r.stderr.match(/Duration: (\d+):(\d+):(\d+(?:\.\d+)?)/);if(!d)throw Error('미디어를 읽을 수 없습니다. 손상되지 않은 MP4(H.264), MP3 또는 WAV를 사용하세요.');const size=r.stderr.match(/Video:.*?\b(\d{2,5})x(\d{2,5})\b/);return {duration:+d[1]*3600+ +d[2]*60+ +d[3],hasAudio:/Stream.*Audio:/.test(r.stderr),sourceWidth:size?+size[1]:1920,sourceHeight:size?+size[2]:1080};}
+async function importFile(p,kind){const ext=path.extname(p).slice(1).toLowerCase();kind=kind||Object.keys(types).find(k=>types[k].includes(ext));if(!types[kind]?.includes(ext))throw Error('지원하지 않는 파일입니다: '+path.basename(p));const url=await grant(p);return {kind,path:p,url,name:path.basename(p),...(kind==='image'?{}:await probe(p))};}
+function paths(p){return [...p.clips.map(c=>c.path),...p.layers.filter(l=>l.type!=='text').map(l=>l.path),...(p.music?[p.music.path]:[])];}
+async function hydrate(input){const p=E.upgrade(input);E.validate(p);for(const f of paths(p))await grant(f);for(const c of p.clips)c.url=mediaUrl(c.path);for(const l of p.layers)if(l.type!=='text')l.url=mediaUrl(l.path);if(p.music)p.music.url=mediaUrl(p.music.path);return p;}
+function fontDirs(){return process.platform==='win32'?[path.join(process.env.WINDIR||'C:\\Windows','Fonts'),path.join(process.env.LOCALAPPDATA||'','Microsoft','Windows','Fonts')]:['/usr/share/fonts/truetype','/usr/local/share/fonts',path.join(os.homedir(),'.local/share/fonts')];}
+async function fontFiles(dir,depth=0){if(depth>3)return [];const out=[];for(const f of await fs.readdir(dir,{withFileTypes:true}).catch(()=>[])){const full=path.join(dir,f.name);if(f.isDirectory())out.push(...await fontFiles(full,depth+1));else if(/\.(ttf|otf|ttc)$/i.test(f.name))out.push(full);}return out;}
+async function prepareFonts(dir){const dest=path.join(dir,'fonts');await fs.mkdir(dest,{recursive:true});let i=0;for(const folder of fontDirs())for(const file of await fontFiles(folder)){const target=path.join(dest,`${i++}-${path.basename(file)}`);await fs.link(file,target).catch(()=>fs.copyFile(file,target)).catch(()=>{});}}
+const recoveryPath=()=>path.join(app.getPath('userData'),'recovery.json');
 app.whenReady().then(()=>{
- protocol.handle('media',request=>{try{const u=new URL(request.url);const p=decodeURIComponent(u.pathname.slice(1));if(u.host!=='local'||!allowed.has(path.resolve(p)))return new Response('Forbidden',{status:403});return net.fetch(pathToFileURL(p).href,{headers:request.headers});}catch{return new Response('Bad request',{status:400});}});
- win=new BrowserWindow({show:!process.argv.includes('--smoke-test'),width:1440,height:940,minWidth:1100,minHeight:760,backgroundColor:'#101218',webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true}});
- win.webContents.on('will-prevent-unload',e=>{const choice=dialog.showMessageBoxSync(win,{type:'question',buttons:['계속 편집','저장하지 않고 종료'],defaultId:0,cancelId:0,message:'저장하지 않은 변경이 있습니다. 종료할까요?'});if(choice===1)e.preventDefault();});
- win.webContents.setWindowOpenHandler(()=>({action:'deny'}));win.webContents.on('will-navigate',e=>e.preventDefault());win.loadFile('ui/index.html');
- if(process.argv.includes('--smoke-test')){
-  const timer=setTimeout(()=>{console.error('UI smoke test timed out');app.exit(1);},20000);
-  win.webContents.once('did-finish-load',async()=>{try{const ok=await win.webContents.executeJavaScript("document.title==='Frame Studio' && typeof window.studio?.export==='function' && !!document.getElementById('canvas')");const probe=await run(['-version']);if(!ok||probe.code!==0)throw Error('UI or bundled FFmpeg unavailable');clearTimeout(timer);console.log('PASS: Electron window, preload bridge and FFmpeg');app.exit(0);}catch(e){console.error(e);app.exit(1);}});
- }
+ protocol.handle('media',async request=>{try{const u=new URL(request.url),p=decodeURIComponent(u.pathname.slice(1));if(u.host!=='local'||!allowed.has(path.resolve(p)))return new Response('Forbidden',{status:403});const r=await net.fetch(pathToFileURL(p).href,{headers:request.headers});const headers=new Headers(r.headers);headers.set('Access-Control-Allow-Origin','*');return new Response(r.body,{status:r.status,statusText:r.statusText,headers});}catch{return new Response('Bad request',{status:400});}});
+ win=new BrowserWindow({show:!process.argv.includes('--smoke-test'),width:1540,height:1000,minWidth:1100,minHeight:760,backgroundColor:'#101218',webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true}});
+ win.webContents.setWindowOpenHandler(()=>({action:'deny'}));win.webContents.on('will-navigate',e=>e.preventDefault());
+ win.webContents.on('will-prevent-unload',e=>{const n=dialog.showMessageBoxSync(win,{type:'question',buttons:['계속 편집','종료'],defaultId:0,cancelId:0,message:'저장하지 않은 변경이 있습니다. 종료할까요?',detail:'자동 복구 사본은 다음 실행 시 불러올 수 있습니다.'});if(n===1)e.preventDefault();});
  win.on('close',e=>{if(job){e.preventDefault();dialog.showMessageBox(win,{message:'내보내기를 취소한 후 종료하세요.'});}});
+ if(process.argv.includes('--smoke-test')){const timer=setTimeout(()=>app.exit(1),20000);win.webContents.once('did-finish-load',async()=>{try{const ok=await win.webContents.executeJavaScript("document.title==='Frame Studio' && typeof window.studio?.importPaths==='function' && !!window.FrameModel && !!document.getElementById('canvas')");const r=await run(ffmpeg,['-version']);if(!ok||r.code)throw Error('UI/FFmpeg unavailable');
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'frame-smoke-')),file=path.join(dir,'seek.mp4');
+ const generated=await run(ffmpeg,['-hide_banner','-y','-f','lavfi','-i','color=c=blue:s=64x64:r=30:d=1','-f','lavfi','-i','color=c=red:s=64x64:r=30:d=1','-filter_complex','[0:v][1:v]concat=n=2:v=1:a=0[v]','-map','[v]','-c:v','libx264','-threads','1','-pix_fmt','yuv420p',file]);
+ if(generated.code)throw Error(generated.stderr);const url=await grant(file);
+ const mediaOK=await win.webContents.executeJavaScript(`new Promise((resolve,reject)=>{const v=document.createElement('video');v.crossOrigin='anonymous';v.preload='auto';v.muted=true;document.getElementById('media').append(v);const timer=setTimeout(()=>reject(Error('Media seek timed out')),10000);v.onerror=()=>reject(Error('Media load failed'));v.onloadeddata=()=>{v.onloadeddata=null;v.currentTime=1.5;};v.onseeked=()=>{try{const c=document.createElement('canvas');c.width=c.height=4;const g=c.getContext('2d');g.drawImage(v,0,0,4,4);const pixel=g.getImageData(0,0,1,1).data;clearTimeout(timer);v.removeAttribute('src');v.load();v.remove();resolve(pixel[0]>180&&pixel[2]<80);}catch(e){reject(e);}};v.src=${JSON.stringify(url)};})`);
+ await fs.rm(dir,{recursive:true,force:true});if(!mediaOK)throw Error('Seeking decoded wrong frame');clearTimeout(timer);console.log('PASS: editor v2, preload, Windows FFmpeg, native media seek and canvas thumbnails');app.exit(0);}catch(e){console.error(e);app.exit(1);}});}
+ win.loadFile('ui/index.html');
 });
 app.on('window-all-closed',()=>app.quit());
-ipcMain.handle('pick',async(_e,kind)=>{const types={video:['mp4','mov','m4v','webm'],image:['png','jpg','jpeg','webp'],music:['mp3','wav','m4a','ogg']};if(!types[kind])throw Error('파일 종류 오류');const r=await dialog.showOpenDialog(win,{properties:['openFile'],filters:[{name:kind,extensions:types[kind]}]});if(r.canceled)return null;const p=r.filePaths[0],url=await grant(p);return {path:p,url,name:path.basename(p),...(kind==='image'?{}:await probe(p))};});
-ipcMain.handle('save',async(_e,p)=>{validate(p);const r=await dialog.showSaveDialog(win,{defaultPath:'내 프로젝트.frame.json',filters:[{name:'Frame 프로젝트',extensions:['json']}]});if(r.canceled)return false;await fs.writeFile(r.filePath,JSON.stringify(p,null,2),'utf8');return true;});
-ipcMain.handle('open',async()=>{const r=await dialog.showOpenDialog(win,{filters:[{name:'Frame 프로젝트',extensions:['json']}],properties:['openFile']});if(r.canceled)return null;try{return await hydrate(JSON.parse(await fs.readFile(r.filePaths[0],'utf8')));}catch(e){throw Error('프로젝트를 열 수 없습니다. 원본 파일이 이동되었거나 형식이 잘못되었습니다. '+e.message);}});
-ipcMain.handle('cancel',()=>{if(job){job.canceled=true;job.child.kill();}});
+ipcMain.handle('pick',async(_e,kind)=>{if(!types[kind])throw Error('파일 종류 오류');const r=await dialog.showOpenDialog(win,{properties:['openFile',...(kind==='music'?[]:['multiSelections'])],filters:[{name:kind,extensions:types[kind]}]});if(r.canceled)return [];const out=[];for(const f of r.filePaths)out.push(await importFile(f,kind));return out;});
+ipcMain.handle('importPaths',async(_e,items)=>{if(!Array.isArray(items)||items.length>100)throw Error('한 번에 100개 이내의 파일을 넣으세요.');const out=[],errors=[];for(const f of items){try{out.push(await importFile(f));}catch(e){errors.push(e.message);}}return {files:out,errors};});
+ipcMain.handle('fonts',async()=>{if(fontsCache)return fontsCache;let names=['Malgun Gothic','Arial','Georgia','Times New Roman'];if(process.platform==='win32'){try{const r=await run('powershell.exe',['-NoProfile','-NonInteractive','-Command',"[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); Add-Type -AssemblyName System.Drawing; $f=New-Object System.Drawing.Text.InstalledFontCollection; ConvertTo-Json -Compress -InputObject @($f.Families | ForEach-Object {$_.Name} | Sort-Object -Unique)"]);if(!r.code)names=JSON.parse(r.stdout.replace(/^\uFEFF/,''));}catch{}}else{try{const r=await run('fc-list',['--format','%{family}\n']);names=r.stdout.split('\n').flatMap(n=>n.split(',')).filter(Boolean);}catch{}}return fontsCache=[...new Set(names)].sort((a,b)=>a.localeCompare(b,'ko'));});
+ipcMain.handle('shortcut',async()=>{if(process.platform!=='win32')throw Error('바탕화면 바로가기는 Windows에서 사용할 수 있습니다.');const target=process.env.PORTABLE_EXECUTABLE_FILE||process.execPath;const ok=shell.writeShortcutLink(path.join(app.getPath('desktop'),'Frame Studio.lnk'),'create',{target,args:app.isPackaged?'':`"${app.getAppPath()}"`,cwd:path.dirname(target),description:'Frame Studio 영상 편집기',icon:target,iconIndex:0});if(!ok)throw Error('바탕화면 바로가기를 만들지 못했습니다.');return true;});
+ipcMain.handle('save',async(_e,p)=>{E.validate(p);const r=await dialog.showSaveDialog(win,{defaultPath:'내 프로젝트.frame.json',filters:[{name:'Frame 프로젝트',extensions:['json']}]});if(r.canceled)return false;if(paths(p).some(f=>path.resolve(f).toLowerCase()===path.resolve(r.filePath).toLowerCase()))throw Error('원본 파일과 다른 이름으로 프로젝트를 저장하세요.');await fs.writeFile(r.filePath,JSON.stringify(p,null,2),'utf8');await fs.rm(recoveryPath(),{force:true});return true;});
+ipcMain.handle('open',async()=>{const r=await dialog.showOpenDialog(win,{filters:[{name:'Frame 프로젝트',extensions:['json']}],properties:['openFile']});if(r.canceled)return null;try{return await hydrate(JSON.parse(await fs.readFile(r.filePaths[0],'utf8')));}catch(e){throw Error('프로젝트를 열 수 없습니다. 원본 파일 위치를 확인하세요. '+e.message);}});
+ipcMain.handle('autosave',async(_e,p)=>{if(!p)return fs.rm(recoveryPath(),{force:true});E.validate(p);const temp=recoveryPath()+'.tmp';await fs.writeFile(temp,JSON.stringify(p),'utf8');await fs.rename(temp,recoveryPath());return true;});
+ipcMain.handle('recover',async()=>{try{return await hydrate(JSON.parse(await fs.readFile(recoveryPath(),'utf8')));}catch{return null;}});
+ipcMain.handle('cancel',()=>{if(job){job.canceled=true;job.child?.kill();}});
 ipcMain.handle('export',async(_e,p)=>{
- if(job)throw Error('이미 내보내는 중입니다.');validate(p);
- for(const f of [p.video.path,...p.layers.filter(l=>l.type==='image').map(l=>l.path),...(p.music?[p.music.path]:[])]){if(!allowed.has(path.resolve(f)))throw Error('앱에서 파일을 다시 불러오세요.');}
- const r=await dialog.showSaveDialog(win,{defaultPath:'완성 영상.mp4',filters:[{name:'MP4 영상',extensions:['mp4']}]});if(r.canceled)return {canceled:true};
- const output=r.filePath;
- if([p.video.path,p.music?.path,...p.layers.map(l=>l.path)].filter(Boolean).some(f=>path.resolve(f).toLowerCase()===path.resolve(output).toLowerCase()))throw Error('원본 파일과 다른 이름으로 저장하세요.');
- const dir=await fs.mkdtemp(path.join(os.tmpdir(),'frame-'));const temp=path.join(path.dirname(output),`.frame-${Date.now()}.mp4`);
- try{
-  const {args,duration}=await plan(p,dir);
-  return await new Promise((resolve,reject)=>{
-   const child=spawn(ffmpeg,[...args,temp],{cwd:dir,windowsHide:true});const current={child,canceled:false};job=current;let log='',buf='';
-   child.stdout.on('data',d=>{buf+=d;const lines=buf.split('\n');buf=lines.pop();for(const line of lines){const m=line.match(/^out_time_us=(\d+)/);if(m&&!win.isDestroyed())win.webContents.send('progress',Math.min(99,Math.round(+m[1]/1e6/duration*100)));}});
-   child.stderr.on('data',d=>log=(log+d).slice(-6000));
+ if(job)throw Error('이미 내보내는 중입니다.');E.validate(p);for(const f of paths(p))if(!allowed.has(path.resolve(f)))throw Error('앱에서 파일을 다시 불러오세요.');
+ const r=await dialog.showSaveDialog(win,{defaultPath:'완성 영상.mp4',filters:[{name:'MP4 영상',extensions:['mp4']}]});if(r.canceled)return {canceled:true};const output=r.filePath;
+ if(paths(p).some(f=>path.resolve(f).toLowerCase()===path.resolve(output).toLowerCase()))throw Error('원본과 다른 이름으로 저장하세요.');
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'frame-')),temp=path.join(path.dirname(output),`.frame-${crypto.randomUUID()}.mp4`);
+ const current={child:null,canceled:false};job=current;
+ try{const {args,duration}=await E.plan(p,dir);if(p.layers.some(l=>l.type==='text'))await prepareFonts(dir);if(current.canceled)return {canceled:true};
+  return await new Promise((resolve,reject)=>{const child=spawn(ffmpeg,[...args,temp],{cwd:dir,windowsHide:true});current.child=child;let log='',buf='';
+   child.stdout.on('data',d=>{buf+=d;const lines=buf.split('\n');buf=lines.pop();for(const line of lines){const m=line.match(/^out_time_us=(\d+)/);if(m&&!win.isDestroyed())win.webContents.send('progress',Math.min(99,Math.round(+m[1]/1e6/duration*100)));}});child.stderr.on('data',d=>log=(log+d).slice(-6000));
    child.once('error',reject);child.once('close',async code=>{try{if(current.canceled)resolve({canceled:true});else if(code!==0)reject(Error('영상 저장 실패: '+log.slice(-1800)));else{await fs.rename(temp,output);resolve({path:output});}}catch(e){reject(e);}});
   });
  }finally{job=null;await fs.rm(dir,{recursive:true,force:true});await fs.rm(temp,{force:true}).catch(()=>{});}

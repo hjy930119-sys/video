@@ -1,32 +1,31 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs/promises'),os=require('node:os'),path=require('node:path');
-const {spawnSync}=require('node:child_process');const {plan,validate,assText}=require('../engine.cjs');
-const ffmpeg=process.env.FRAME_FFMPEG||require('ffmpeg-static');
+const {spawnSync}=require('node:child_process'),E=require('../engine.cjs'),ffmpeg=process.env.FRAME_FFMPEG||require('ffmpeg-static');
 function run(args,cwd){const r=spawnSync(ffmpeg,['-hide_banner','-loglevel','error','-threads','1',...args],{cwd,encoding:'utf8',maxBuffer:10e6});assert.equal(r.status,0,r.stderr);return r;}
-function pixel(file,t,x,y){const r=spawnSync(ffmpeg,['-v','error','-ss',String(t),'-i',file,'-vf',`crop=2:2:${x}:${y}`,'-frames:v','1','-f','rawvideo','-pix_fmt','rgb24','-threads','1','pipe:1']);assert.equal(r.status,0,r.stderr?.toString());return [...r.stdout.slice(0,3)];}
-const base=()=>({version:1,video:{path:'source.mp4',duration:3,hasAudio:false},trim:{start:1,end:3},width:320,height:180,volume:1,music:null,layers:[]});
-test('invalid times, geometry and malicious subtitle overrides are handled',()=>{assert.throws(()=>validate({...base(),trim:{start:2,end:1}}));assert.throws(()=>validate({...base(),width:321}));assert.equal(assText('{\\pos(1,1)}\nhello'),'｛＼pos(1,1)｝\\Nhello');});
-test('real MP4 export: trim, timed image, subtitle and looped audio',async()=>{
- const dir=await fs.mkdtemp(path.join(os.tmpdir(),'frame-test-'));
+function raw(file,time,filter){const r=spawnSync(ffmpeg,['-v','error','-ss',String(time),'-i',file,'-vf',filter,'-frames:v','1','-f','rawvideo','-pix_fmt','rgb24','-threads','1','pipe:1']);assert.equal(r.status,0,r.stderr.toString());return r.stdout;}
+const pixel=(file,time,x=10,y=10)=>[...raw(file,time,`crop=2:2:${x}:${y}`).slice(0,3)];
+const clip=(file,duration,hasAudio=false)=>({id:E.uid(),path:file,duration,in:0,out:duration,hasAudio,volume:1,fadeIn:0,fadeOut:0});
+const base=()=>({...E.blank(),width:320,height:180,clips:[clip('blue.mp4',3)]});
+test('project migration preserves trimmed overlay times; split preserves source and fades',()=>{const p=E.upgrade({version:1,video:{path:'a.mp4',duration:10,hasAudio:true},trim:{start:2,end:8},volume:.7,width:320,height:180,music:null,layers:[{id:'x',type:'text',text:'Hi',start:3,end:5,x:.5,y:.8,size:32,color:'#ffffff'}]});assert.equal(E.duration(p),6);assert.equal(p.layers[0].start,1);assert.equal(p.layers[0].end,3);E.validate(p);p.clips[0].fadeIn=.5;p.clips[0].fadeOut=.5;const id=E.split(p,p.clips[0].id,3);assert.ok(id);assert.equal(p.clips.length,2);assert.equal(p.clips[0].out,5);assert.equal(p.clips[1].in,5);assert.equal(p.clips[0].fadeOut,0);assert.equal(p.clips[1].fadeIn,0);assert.equal(E.duration(p),6);assert.equal(E.locate(p,4).id,id);assert.equal(E.assText('{\\pos(1,1)}\nHello'),'｛＼pos(1,1)｝\\NHello');});
+test('reject invalid times, media overrun, ASS font injection and fades',()=>{assert.throws(()=>E.validate({...base(),width:321}));const p=base();p.clips[0].in=4;assert.throws(()=>E.validate(p));const q=base();q.layers=[{type:'video',path:'p.mp4',duration:1,in:0,start:0,end:2,x:0,y:0,width:.2,opacity:1,volume:0}];assert.throws(()=>E.validate(q));q.layers=[{type:'text',text:'x',font:'Bad\nfont',size:32,color:'#ffffff',x:0,y:0,start:0,end:1,opacity:1}];assert.throws(()=>E.validate(q));assert.equal(E.opacity({start:1,end:3,opacity:.8,fadeIn:.5,fadeOut:.5},1.25),.4);});
+test('real concatenation, silent/audio clips, timed PIP, image, caption, fades and music',async()=>{
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),"frame-v2-' space-"));
  try{
- run(['-f','lavfi','-i','color=c=blue:s=320x180:r=30:d=3','-c:v','libx264','-pix_fmt','yuv420p',path.join(dir,'source.mp4')]);
- run(['-f','lavfi','-i','color=c=red:s=40x40','-frames:v','1','-threads','1',path.join(dir,'image.png')]);
- run(['-f','lavfi','-i','sine=frequency=440:duration=0.3',path.join(dir,'music.wav')]);
- const p=base();p.video.path=path.join(dir,'source.mp4');p.music={path:path.join(dir,'music.wav'),volume:.2};
- p.layers=[{id:'i',type:'image',path:path.join(dir,'image.png'),start:1.5,end:2.5,x:0,y:0,width:.25,opacity:1},{id:'t',type:'text',text:'TEST',start:1.5,end:2.5,x:.5,y:.4,size:32,color:'#ffffff'}];
- const job=await plan(p,dir),out=path.join(dir,'result.mp4');run([...job.args,out],dir);
- const pre=pixel(out,.2,10,10),during=pixel(out,.8,10,10),post=pixel(out,1.8,10,10);
- assert.ok(pre[2]>200&&pre[0]<40,`before ${pre}`);assert.ok(during[0]>200&&during[2]<40,`during ${during}`);assert.ok(post[2]>200&&post[0]<40,`after ${post}`);
- const caption=spawnSync(ffmpeg,['-v','error','-ss','0.8','-i',out,'-vf','crop=120:50:100:70','-frames:v','1','-f','rawvideo','-pix_fmt','rgb24','-threads','1','pipe:1']);
- let white=0;for(let i=0;i<caption.stdout.length;i+=3)if(caption.stdout[i]>180&&caption.stdout[i+1]>180&&caption.stdout[i+2]>180)white++;assert.ok(white>30,'subtitle rendered');
- const probe=spawnSync(ffmpeg,['-hide_banner','-i',out],{encoding:'utf8'}).stderr;assert.match(probe,/Duration: 00:00:02\.00/);assert.match(probe,/Audio: aac/);
- const raw=spawnSync(ffmpeg,['-v','error','-ss','1.7','-i',out,'-t','0.1','-vn','-f','s16le','pipe:1']);assert.ok(raw.stdout.length>100,'music continues after looping');
- }finally{await fs.rm(dir,{recursive:true,force:true});}
-});
-test('original audio survives export, silent video exports without audio',async()=>{
- const dir=await fs.mkdtemp(path.join(os.tmpdir(),'frame-audio-'));try{
- run(['-f','lavfi','-i','color=c=black:s=320x180:r=30:d=3','-f','lavfi','-i','sine=frequency=220:duration=3','-c:v','libx264','-c:a','aac','-shortest',path.join(dir,'source.mp4')]);
- const p=base();p.video={...p.video,path:path.join(dir,'source.mp4'),hasAudio:true};const job=await plan(p,dir);run([...job.args,path.join(dir,'out.mp4')],dir);
- const probe=spawnSync(ffmpeg,['-hide_banner','-i',path.join(dir,'out.mp4')],{encoding:'utf8'}).stderr;assert.match(probe,/Audio: aac/);
- p.video.hasAudio=false;const silent=await plan(p,dir);run([...silent.args,path.join(dir,'silent.mp4')],dir);const info=spawnSync(ffmpeg,['-hide_banner','-i',path.join(dir,'silent.mp4')],{encoding:'utf8'}).stderr;assert.doesNotMatch(info,/Audio:/);
+  const blue=path.join(dir,'blue clip.mp4'),green=path.join(dir,'green.mp4'),pip=path.join(dir,'pip.mp4'),image=path.join(dir,'logo.png'),music=path.join(dir,'music.wav');
+  run(['-f','lavfi','-i','color=c=blue:s=320x180:r=30:d=1.5','-c:v','libx264','-pix_fmt','yuv420p',blue]);
+  run(['-f','lavfi','-i','color=c=lime:s=240x240:r=24:d=1.5','-f','lavfi','-i','sine=frequency=220:duration=1.5','-c:v','libx264','-c:a','aac','-shortest',green]);
+  run(['-f','lavfi','-i','color=c=red:s=80x80:r=30:d=2','-f','lavfi','-i','sine=frequency=660:duration=2','-c:v','libx264','-c:a','aac','-shortest',pip]);
+  run(['-f','lavfi','-i','color=c=white:s=40x40','-frames:v','1','-threads','1',image]);run(['-f','lavfi','-i','sine=frequency=440:duration=0.3',music]);
+  const p={...base(),clips:[{...clip(blue,1.5),fadeIn:.4},{...clip(green,1.5,true),fadeOut:.4}],music:{path:music,volume:.1,fadeIn:.1,fadeOut:.1},layers:[
+   {id:'pip',type:'video',path:pip,duration:2,in:.2,start:.5,end:1.2,x:0,y:0,width:.25,opacity:1,volume:.1,hasAudio:true,fadeIn:.1,fadeOut:.1},
+   {id:'img',type:'image',path:image,start:1.7,end:2.2,x:.7,y:.1,width:.2,opacity:1,fadeIn:0,fadeOut:0},
+   {id:'text',type:'text',text:'TEST',font:process.platform==='win32'?'Arial':'DejaVu Sans',size:32,color:'#ffffff',bold:true,x:.3,y:.5,opacity:1,start:.5,end:1.2,fadeIn:.1,fadeOut:.1}]
+  };
+  const {args}=await E.plan(p,dir),out=path.join(dir,'out.mp4');run([...args,out],dir);
+  assert.ok(pixel(out,.1)[2]<120,'video fade in');assert.ok(pixel(out,.45)[2]>200,'blue before overlay');assert.ok(pixel(out,.8)[0]>200,'PIP red visible');assert.ok(pixel(out,1.3)[2]>200,'PIP gone');
+  const g=pixel(out,2,150,20);assert.ok(g[1]>200&&g[0]<40,'second differently sized clip is green');assert.ok(pixel(out,2.9,150,20)[1]<120,'video fade out');const img=pixel(out,1.9,230,25);assert.ok(img.every(v=>v>200),'image visible in second clip');
+  const text=raw(out,.8,'crop=200:70:80:80');let white=0;for(let i=0;i<text.length;i+=3)if(text[i]>180&&text[i+1]>180&&text[i+2]>180)white++;assert.ok(white>30,'caption rendered');
+  const fractional={...base(),clips:[{...clip(blue,1.5),out:.83},{...clip(green,1.5,true),out:1.16}]};const fj=await E.plan(fractional,dir),fo=path.join(dir,'fractional.mp4');run([...fj.args,fo],dir);assert.ok(Math.abs(E.duration(fractional)-2)<1e-6,'cuts align to output frames');assert.ok(pixel(fo,.8,150,20)[2]>200,'frame before cut blue');assert.ok(pixel(fo,.9,150,20)[1]>200,'frame after cut green');
+  const probe=spawnSync(ffmpeg,['-hide_banner','-i',out],{encoding:'utf8'}).stderr;assert.match(probe,/Duration: 00:00:03\.00/);assert.match(probe,/Audio: aac/);
+  const audio=spawnSync(ffmpeg,['-v','error','-ss','2.4','-i',out,'-t','0.1','-vn','-f','s16le','pipe:1']);assert.equal(audio.status,0);assert.ok(audio.stdout.some(v=>v!==0),'audio and music at end');
  }finally{await fs.rm(dir,{recursive:true,force:true});}
 });

@@ -27,7 +27,7 @@ jobs:
         run: npm test
       - name: Verify Electron window and preload
         run: '& .\node_modules\.bin\electron.cmd . --smoke-test'
-      - name: Build portable Windows EXE
+      - name: Build Windows installer and portable EXE
         run: npm run dist:win
       - name: Verify packaged Windows FFmpeg
         shell: pwsh
@@ -36,12 +36,30 @@ jobs:
           if (!(Test-Path $ffmpeg)) { throw 'Packaged FFmpeg missing' }
           & $ffmpeg -version
           if ($LASTEXITCODE -ne 0) { throw 'Packaged FFmpeg failed' }
+      - name: Verify installed app and desktop shortcut
+        shell: pwsh
+        run: |
+          $desktop = [Environment]::GetFolderPath('Desktop')
+          if (!$desktop) { $desktop = Join-Path $env:USERPROFILE 'Desktop' }
+          New-Item -ItemType Directory -Force -Path $desktop | Out-Null
+          $setup = (Get-ChildItem 'dist/Frame-Studio-*-Setup.exe').FullName
+          $installDir = Join-Path $env:RUNNER_TEMP 'FrameStudioInstall'
+          $installer = Start-Process -FilePath $setup -ArgumentList "/S /D=$installDir" -Wait -PassThru
+          if ($installer.ExitCode -ne 0) { throw "Installer failed: $($installer.ExitCode)" }
+          $exe = Join-Path $installDir 'Frame Studio.exe'
+          if (!(Test-Path $exe)) { throw 'Installed EXE missing' }
+          $shortcut = Join-Path $desktop 'Frame Studio.lnk'
+          if (!(Test-Path $shortcut)) { throw 'Desktop shortcut missing' }
+          $link = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut)
+          if ($link.TargetPath -ne $exe) { throw 'Desktop shortcut points to wrong executable' }
+          $app = Start-Process -FilePath $exe -ArgumentList '--smoke-test' -Wait -PassThru
+          if ($app.ExitCode -ne 0) { throw "Installed app smoke test failed: $($app.ExitCode)" }
       - name: Upload downloadable ZIP
         uses: actions/upload-artifact@v4
         with:
           name: Frame-Studio-Windows
           path: |
-            dist/Frame-Studio-*-Windows.exe
+            dist/Frame-Studio-*.exe
             README.md
             THIRD_PARTY.md
             LICENSE
@@ -52,4 +70,4 @@ jobs:
         shell: pwsh
         run: |
           '## Windows ZIP ready' >> $env:GITHUB_STEP_SUMMARY
-          'Download **Frame-Studio-Windows** from **Artifacts** below, extract all files, then run the EXE.' >> $env:GITHUB_STEP_SUMMARY
+          'Download **Frame-Studio-Windows** from **Artifacts** below, extract all files, then run **Setup.exe** to install with a desktop icon (or **Portable.exe** without installation).' >> $env:GITHUB_STEP_SUMMARY
