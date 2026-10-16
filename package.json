@@ -1,6 +1,6 @@
 {
   "name": "frame-studio",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Local video editor with Korean captions and image overlays",
   "main": "main.cjs",
   "author": "Frame Studio",
@@ -63,4 +63,3 @@
     }
   }
 }
-

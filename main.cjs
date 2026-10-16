@@ -2,6 +2,7 @@ const {app,BrowserWindow,ipcMain,dialog,protocol,net,shell}=require('electron');
 const {spawn}=require('node:child_process'),fs=require('node:fs/promises'),path=require('node:path'),os=require('node:os'),crypto=require('node:crypto');
 const {pathToFileURL}=require('node:url'),E=require('./engine.cjs');
 const ffmpeg=process.env.FRAME_FFMPEG||require('ffmpeg-static').replace('app.asar','app.asar.unpacked');
+if(process.argv.includes('--smoke-test'))app.commandLine.appendSwitch('autoplay-policy','no-user-gesture-required');
 let win,job;const allowed=new Set();let fontsCache;
 protocol.registerSchemesAsPrivileged([{scheme:'media',privileges:{standard:true,secure:true,supportFetchAPI:true,stream:true,corsEnabled:true}}]);
 const mediaUrl=p=>'media://local/'+encodeURIComponent(p);
@@ -22,12 +23,13 @@ app.whenReady().then(()=>{
  win.webContents.setWindowOpenHandler(()=>({action:'deny'}));win.webContents.on('will-navigate',e=>e.preventDefault());
  win.webContents.on('will-prevent-unload',e=>{const n=dialog.showMessageBoxSync(win,{type:'question',buttons:['계속 편집','종료'],defaultId:0,cancelId:0,message:'저장하지 않은 변경이 있습니다. 종료할까요?',detail:'자동 복구 사본은 다음 실행 시 불러올 수 있습니다.'});if(n===1)e.preventDefault();});
  win.on('close',e=>{if(job){e.preventDefault();dialog.showMessageBox(win,{message:'내보내기를 취소한 후 종료하세요.'});}});
- if(process.argv.includes('--smoke-test')){const timer=setTimeout(()=>app.exit(1),20000);win.webContents.once('did-finish-load',async()=>{try{const ok=await win.webContents.executeJavaScript("document.title==='Frame Studio' && typeof window.studio?.importPaths==='function' && !!window.FrameModel && !!document.getElementById('canvas')");const r=await run(ffmpeg,['-version']);if(!ok||r.code)throw Error('UI/FFmpeg unavailable');
+ if(process.argv.includes('--smoke-test')){const timer=setTimeout(()=>app.exit(1),45000);win.webContents.once('did-finish-load',async()=>{try{const ok=await win.webContents.executeJavaScript("document.title==='Frame Studio' && typeof window.studio?.importPaths==='function' && !!window.FrameModel && !!document.getElementById('canvas')");const r=await run(ffmpeg,['-version']);if(!ok||r.code)throw Error('UI/FFmpeg unavailable');
  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'frame-smoke-')),file=path.join(dir,'seek.mp4');
- const generated=await run(ffmpeg,['-hide_banner','-y','-f','lavfi','-i','color=c=blue:s=64x64:r=30:d=1','-f','lavfi','-i','color=c=red:s=64x64:r=30:d=1','-filter_complex','[0:v][1:v]concat=n=2:v=1:a=0[v]','-map','[v]','-c:v','libx264','-threads','1','-pix_fmt','yuv420p',file]);
+ const generated=await run(ffmpeg,['-hide_banner','-y','-f','lavfi','-i','color=c=blue:s=64x64:r=30:d=1','-f','lavfi','-i','color=c=red:s=64x64:r=30:d=1','-f','lavfi','-i','sine=frequency=440:duration=2','-filter_complex','[0:v][1:v]concat=n=2:v=1:a=0[v]','-map','[v]','-map','2:a','-c:a','aac','-shortest','-c:v','libx264','-threads','1','-pix_fmt','yuv420p',file]);
  if(generated.code)throw Error(generated.stderr);const url=await grant(file);
  const mediaOK=await win.webContents.executeJavaScript(`new Promise((resolve,reject)=>{const v=document.createElement('video');v.crossOrigin='anonymous';v.preload='auto';v.muted=true;document.getElementById('media').append(v);const timer=setTimeout(()=>reject(Error('Media seek timed out')),10000);v.onerror=()=>reject(Error('Media load failed'));v.onloadeddata=()=>{v.onloadeddata=null;v.currentTime=1.5;};v.onseeked=()=>{try{const c=document.createElement('canvas');c.width=c.height=4;const g=c.getContext('2d');g.drawImage(v,0,0,4,4);const pixel=g.getImageData(0,0,1,1).data;clearTimeout(timer);v.removeAttribute('src');v.load();v.remove();resolve(pixel[0]>180&&pixel[2]<80);}catch(e){reject(e);}};v.src=${JSON.stringify(url)};})`);
- await fs.rm(dir,{recursive:true,force:true});if(!mediaOK)throw Error('Seeking decoded wrong frame');clearTimeout(timer);console.log('PASS: editor v2, preload, Windows FFmpeg, native media seek and canvas thumbnails');app.exit(0);}catch(e){console.error(e);app.exit(1);}});}
+ if(mediaOK){win.showInactive();const info=await importFile(file,'video');const script=await fs.readFile(path.join(__dirname,'ui/smoke-seek.js'),'utf8');await win.webContents.executeJavaScript(script+';frameSmokeSeek('+JSON.stringify(info)+')',true);}
+ await fs.rm(dir,{recursive:true,force:true,maxRetries:10,retryDelay:100});if(!mediaOK)throw Error('Seeking decoded wrong frame');clearTimeout(timer);console.log('PASS: editor v2, preload, Windows FFmpeg, native media seek and canvas thumbnails');app.exit(0);}catch(e){console.error(e);app.exit(1);}});}
  win.loadFile('ui/index.html');
 });
 app.on('window-all-closed',()=>app.quit());
